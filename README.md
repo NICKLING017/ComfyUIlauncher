@@ -2,6 +2,8 @@
 
 一个跨平台（以 Windows 为主）的 ComfyUI 可视化启动工具，替代原有一键启动脚本。提供路径/版本选择、启动与停止、日志面板（实时/过滤/搜索/高亮）、配置导入导出、更新检查等功能，并支持打包为单文件 EXE。
 
+## 直接运行ComfyUILauncher.exe即可 ##
+
 ## 项目结构
 
 - `gui_launcher.py`：GUI 主程序（Tkinter/ttk）
