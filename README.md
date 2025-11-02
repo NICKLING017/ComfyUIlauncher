@@ -29,6 +29,7 @@
 - `VENV_DIR`：虚拟环境目录名（相对 `COMFYUI_DIR`，如 `venv`、`.venv`、`3.11.venv`；留空表示使用系统 Python）
 - `AUTO_ARGS`：启动参数（默认 `--auto-launch`）
 - `UPDATE_CHECK`：`1/0`，启用或禁用启动前的 git 更新检查
+- `VRAM_RESERVE_GB`：为系统/桌面预留的显存（GB）。在启动时会在子进程中设置 PyTorch 的显存占用比例，并将预留字节通过环境变量传入，便于 ComfyUI/模型加载端进行分块与批量大小控制。建议 0.5–2.0 之间，AMD/ROCm 显卡上有助于避免显存吃满造成卡顿或驱动重置。
 - `ICON_PATH`：窗口图标（可选，`.ico` 文件路径）
 
 GUI 的“保存配置/导入配置/导出配置”会读写该文件；打包后该文件与 EXE 位于同目录。
@@ -81,6 +82,7 @@ python -m pip install torch torchvision --index-url https://download.pytorch.org
 - 版本选择：扫描并选择虚拟环境目录（或“系统 Python”）
 - 启动参数：编辑 `AUTO_ARGS`（默认 `--auto-launch`）
 - 更新检查：勾选启用启动前 `git fetch/pull`
+- 预留显存：输入“预留显存/GB”，启动前自动应用（在子进程设置显存上限并传递环境变量）
 - 启动与停止：
   - 启动时使用 `python -u main.py`，实时日志输出到面板
   - 停止流程：`CTRL_BREAK_EVENT` → `terminate` → `taskkill /T /F`（Windows）

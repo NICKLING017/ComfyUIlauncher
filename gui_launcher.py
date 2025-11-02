@@ -13,6 +13,8 @@ DEFAULT_CFG = {
     "AUTO_ARGS": "--auto-launch",
     "UPDATE_CHECK": "1",
     "ICON_PATH": "",
+    # 新增：预留显存（GB）
+    "VRAM_RESERVE_GB": "1.0",
 }
 
 
@@ -35,7 +37,14 @@ def read_config(cfg_path: str):
 
 def write_config(cfg_path: str, cfg: dict):
     lines = ["# ComfyUI Launcher Config"]
-    for k in ["COMFYUI_DIR", "VENV_DIR", "AUTO_ARGS", "UPDATE_CHECK", "ICON_PATH"]:
+    for k in [
+        "COMFYUI_DIR",
+        "VENV_DIR",
+        "AUTO_ARGS",
+        "UPDATE_CHECK",
+        "ICON_PATH",
+        "VRAM_RESERVE_GB",
+    ]:
         lines.append(f"{k}={cfg.get(k, DEFAULT_CFG.get(k, ''))}")
     with open(cfg_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -218,8 +227,15 @@ class LauncherApp(tk.Tk):
         self.var_update = tk.BooleanVar(value=True)
         ttk.Checkbutton(left, text="启动前检查并拉取更新", variable=self.var_update).grid(row=5, column=3, sticky="e")
 
+        # 新增：预留显存/GB
+        ttk.Label(left, text="预留显存/GB").grid(row=6, column=0, sticky="w")
+        self.var_vram_reserve = tk.StringVar(value=str(DEFAULT_CFG.get("VRAM_RESERVE_GB", "1.0")))
+        self.entry_vram = ttk.Entry(left, textvariable=self.var_vram_reserve)
+        self.entry_vram.grid(row=7, column=0, sticky="ew", pady=(4, 8))
+        ttk.Label(left, text="为系统/桌面预留，防止显存吃满").grid(row=7, column=1, columnspan=3, sticky="w")
+
         btn_frame = ttk.Frame(left)
-        btn_frame.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        btn_frame.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         for i in range(4):
             btn_frame.columnconfigure(i, weight=1)
         ttk.Button(btn_frame, text="保存配置", command=self.on_save).grid(row=0, column=0, sticky="ew")
@@ -265,6 +281,8 @@ class LauncherApp(tk.Tk):
         self.var_dir.set(self.cfg.get("COMFYUI_DIR", DEFAULT_CFG["COMFYUI_DIR"]))
         self.var_args.set(self.cfg.get("AUTO_ARGS", DEFAULT_CFG["AUTO_ARGS"]))
         self.var_update.set(str(self.cfg.get("UPDATE_CHECK", "1")).strip() == "1")
+        # 预留显存
+        self.var_vram_reserve.set(self.cfg.get("VRAM_RESERVE_GB", DEFAULT_CFG.get("VRAM_RESERVE_GB", "1.0")))
         # 填充 venv 列表
         self._populate_venvs()
         venv_dir = self.cfg.get("VENV_DIR", "").strip()
@@ -330,6 +348,7 @@ class LauncherApp(tk.Tk):
             "AUTO_ARGS": self.var_args.get().strip() or DEFAULT_CFG["AUTO_ARGS"],
             "UPDATE_CHECK": "1" if self.var_update.get() else "0",
             "ICON_PATH": self.cfg.get("ICON_PATH", ""),
+            "VRAM_RESERVE_GB": self.var_vram_reserve.get().strip() or DEFAULT_CFG.get("VRAM_RESERVE_GB", "1.0"),
         }
         write_config(self.cfg_path, cfg)
         self.cfg = cfg.copy()
@@ -345,6 +364,7 @@ class LauncherApp(tk.Tk):
         self.var_dir.set(cfg.get("COMFYUI_DIR", DEFAULT_CFG["COMFYUI_DIR"]))
         self.var_args.set(cfg.get("AUTO_ARGS", DEFAULT_CFG["AUTO_ARGS"]))
         self.var_update.set(str(cfg.get("UPDATE_CHECK", "1")).strip() == "1")
+        self.var_vram_reserve.set(cfg.get("VRAM_RESERVE_GB", DEFAULT_CFG.get("VRAM_RESERVE_GB", "1.0")))
         self._populate_venvs()
         venv_dir = cfg.get("VENV_DIR", "").strip()
         self.var_venv.set(venv_dir if venv_dir else "系统 Python")
@@ -362,6 +382,7 @@ class LauncherApp(tk.Tk):
             "AUTO_ARGS": self.var_args.get().strip() or DEFAULT_CFG["AUTO_ARGS"],
             "UPDATE_CHECK": "1" if self.var_update.get() else "0",
             "ICON_PATH": self.cfg.get("ICON_PATH", ""),
+            "VRAM_RESERVE_GB": self.var_vram_reserve.get().strip() or DEFAULT_CFG.get("VRAM_RESERVE_GB", "1.0"),
         }
         write_config(file, cfg)
         self.var_status.set("[INFO] 配置已导出")
@@ -411,7 +432,7 @@ class LauncherApp(tk.Tk):
             self.log_text.see(tk.END)
 
     def _set_busy(self, busy: bool):
-        for w in (self.entry_dir, self.combo_venv, self.entry_args):
+        for w in (self.entry_dir, self.combo_venv, self.entry_args, self.entry_vram):
             w.configure(state="disabled" if busy else "normal")
         self.progress.configure(mode="indeterminate" if busy else "determinate")
         if busy:
@@ -419,12 +440,66 @@ class LauncherApp(tk.Tk):
         else:
             self.progress.stop()
 
+    # 生成包装脚本，用于在子进程中设置显存限制后再运行 main.py
+    def _ensure_wrapper(self, wrapper_path: str):
+        try:
+            content = (
+                "import os, runpy\n"
+                "reserve_bytes = int(os.getenv('COMFYUI_VRAM_RESERVE_BYTES','0'))\n"
+                "device = int(os.getenv('COMFYUI_DEVICE','0') or '0')\n"
+                "try:\n"
+                "    import torch\n"
+                "    if torch.cuda.is_available():\n"
+                "        total = torch.cuda.get_device_properties(device).total_memory\n"
+                "        target = max(0, total - reserve_bytes)\n"
+                "        fraction = 1.0 if total == 0 else max(0.0, min(1.0, target/float(total)))\n"
+                "        try:\n"
+                "            torch.cuda.set_per_process_memory_fraction(fraction, device=device)\n"
+                "            print(f'[INFO] VRAM fraction set to {fraction:.3f}, reserve {reserve_bytes/(1024**3):.2f} GB')\n"
+                "        except Exception as e:\n"
+                "            print('[WARN] set_per_process_memory_fraction not supported:', e)\n"
+                "except Exception as e:\n"
+                "    print('[WARN] VRAM reserve setup failed:', e)\n"
+                "path = os.getenv('COMFYUI_MAIN_PATH')\n"
+                "if not path:\n"
+                "    raise RuntimeError('Missing COMFYUI_MAIN_PATH')\n"
+                "# 确保 ComfyUI 目录在 sys.path，并切换到该目录\n"
+                "import sys\n"
+                "dirpath = os.path.dirname(path)\n"
+                "try:\n"
+                "    os.chdir(dirpath)\n"
+                "except Exception:\n"
+                "    pass\n"
+                "if dirpath not in sys.path:\n"
+                "    sys.path.insert(0, dirpath)\n"
+                "runpy.run_path(path, run_name='__main__')\n"
+            )
+            # 若内容不同或文件不存在，则写入
+            need_write = True
+            if os.path.isfile(wrapper_path):
+                try:
+                    with open(wrapper_path, 'r', encoding='utf-8') as f:
+                        old = f.read()
+                        need_write = (old != content)
+                except Exception:
+                    need_write = True
+            if need_write:
+                with open(wrapper_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+        except Exception:
+            pass
+
     def on_launch(self):
         comfy_dir = self.var_dir.get().strip()
         venv_sel = self.var_venv.get().strip()
         venv_dir = "" if venv_sel == "系统 Python" else venv_sel
         auto_args = self.var_args.get().strip() or "--auto-launch"
         update_check = self.var_update.get()
+        # 读取预留显存
+        try:
+            reserve_gb = float(self.var_vram_reserve.get().strip() or "0")
+        except Exception:
+            reserve_gb = 0.0
 
         if not os.path.isdir(comfy_dir):
             messagebox.showerror("错误", f"ComfyUI 目录不存在: {comfy_dir}")
@@ -455,10 +530,19 @@ class LauncherApp(tk.Tk):
             try:
                 if update_check:
                     git_update_if_needed(comfy_dir, log)
+                # 生成包装脚本，用于在子进程中设置显存限制
+                wrapper = os.path.join(self.script_dir, "_comfyui_launch_wrapper.py")
+                self._ensure_wrapper(wrapper)
                 # 使用 -u 强制禁用缓冲，便于日志实时显示
-                cmd = [py, "-u", main_py] + auto_args.split()
+                cmd = [py, "-u", wrapper] + auto_args.split()
                 env = os.environ.copy()
                 env["PYTHONUNBUFFERED"] = "1"
+                # 向子进程传递主程序路径与预留显存字节数
+                env["COMFYUI_MAIN_PATH"] = main_py
+                env["COMFYUI_VRAM_RESERVE_BYTES"] = str(int(max(0.0, reserve_gb) * (1024**3)))
+                # 可选：HIP/ROCm 的分配器碎片优化（不强制）
+                if "ROCM" in os.environ.get("PYTORCH_ROCM_ARCH", "") or os.environ.get("HSA_PATH", ""):
+                    env.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:128")
                 self.proc = subprocess.Popen(
                     cmd,
                     cwd=comfy_dir,
@@ -471,7 +555,7 @@ class LauncherApp(tk.Tk):
                 )
                 self.running = True
                 self._update_status_indicator(True)
-                log(f"[INFO] 已启动: {os.path.basename(py)} {os.path.basename(main_py)}")
+                log(f"[INFO] 已启动: {os.path.basename(py)} {os.path.basename(main_py)} (预留显存 {reserve_gb} GB)")
                 # 启动日志读取线程
                 self.stdout_thread = threading.Thread(target=self._read_stream, args=(self.proc.stdout, "INFO"), daemon=True)
                 self.stderr_thread = threading.Thread(target=self._read_stream, args=(self.proc.stderr, "ERROR"), daemon=True)
